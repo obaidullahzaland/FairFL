@@ -201,6 +201,7 @@ def main(results_dir="results"):
     for name, dataset in datasets.items():
         for n_clients in client_counts:
             # partition data
+            print(f"Partitioning Dataset {name}")
             idx_iid = partition_data_iid(dataset, n_clients)
             idx_qty = partition_data_quantity_skew_iid(dataset, n_clients)
             idx_cls = partition_data_class_noniid(dataset, n_clients)
