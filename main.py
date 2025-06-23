@@ -32,203 +32,175 @@ class SimpleCNN(nn.Module):
 def partition_data_iid(dataset, num_clients):
     data_size = len(dataset)
     shard_size = data_size // num_clients
-    all_indices = list(range(data_size))
-    random.shuffle(all_indices)
-    client_indices = [all_indices[i*shard_size:(i+1)*shard_size] for i in range(num_clients)]
-    return client_indices
+    indices = list(range(data_size))
+    random.shuffle(indices)
+    return [indices[i*shard_size:(i+1)*shard_size] for i in range(num_clients)]
 
 
 def partition_data_quantity_skew_iid(dataset, num_clients, alpha=0.5):
-    # Dirichlet for quantity skew but iid distribution
     data_size = len(dataset)
-    proportions = np.random.dirichlet([alpha] * num_clients)
-    proportions = (proportions / proportions.sum())
-    sizes = (proportions * data_size).astype(int)
-    # adjust rounding
+    props = np.random.dirichlet([alpha]*num_clients)
+    sizes = (props/props.sum() * data_size).astype(int)
     sizes[-1] = data_size - sizes[:-1].sum()
-    all_indices = list(range(data_size))
-    random.shuffle(all_indices)
-    client_indices = []
-    idx = 0
+    indices = list(range(data_size))
+    random.shuffle(indices)
+    client_indices, idx = [], 0
     for sz in sizes:
-        client_indices.append(all_indices[idx:idx+sz])
-        idx += sz
+        client_indices.append(indices[idx:idx+sz]); idx += sz
     return client_indices
 
 
 def partition_data_class_noniid(dataset, num_clients, classes_per_client=2):
-    # Class-based non-IID: assign exclusive samples of chosen classes
     targets = np.array(dataset.targets)
     num_classes = len(np.unique(targets))
-    # random class assignment per client
+    # assign classes
     client_classes = [np.random.choice(num_classes, classes_per_client, replace=False).tolist()
                       for _ in range(num_clients)]
-    # map class to clients
     class2clients = {c: [] for c in range(num_classes)}
-    for cid, clist in enumerate(client_classes):
-        for c in clist:
+    for cid, cl in enumerate(client_classes):
+        for c in cl:
             class2clients[c].append(cid)
-    # initialize indices
     client_indices = [[] for _ in range(num_clients)]
-    # distribute samples for each class
-    for c, clients_with_c in class2clients.items():
-        if not clients_with_c:
-            continue
-        inds = np.where(targets == c)[0].tolist()
+    for c, cids in class2clients.items():
+        inds = np.where(targets==c)[0].tolist()
         random.shuffle(inds)
-        # split inds evenly among clients_with_c
-        k = len(clients_with_c)
-        shard_size = len(inds) // k
-        remainder = len(inds) % k
-        start = 0
-        for i, cid in enumerate(clients_with_c):
-            size = shard_size + (1 if i < remainder else 0)
-            client_indices[cid].extend(inds[start:start+size])
-            start += size
+        k = len(cids)
+        if k==0: continue
+        base = len(inds)//k; rem = len(inds)%k; st=0
+        for i,cid in enumerate(cids):
+            size = base + (1 if i<rem else 0)
+            client_indices[cid].extend(inds[st:st+size]); st+=size
     return client_indices
 
 # -----------------------
 # Client Simulation
 # -----------------------
 class Client:
-    def __init__(self, cid, dataset, indices, model_fn, device, compute_speed, comm_speed):
-        self.cid = cid
-        self.device = device
-        self.compute_speed = compute_speed  # e.g., samples/sec
-        self.comm_speed = comm_speed      # e.g., bytes/sec
+    def __init__(self, cid, dataset, indices, model_fn, device, comp_speed, comm_speed):
+        self.cid = cid; self.device = device
+        self.comp_speed, self.comm_speed = comp_speed, comm_speed
         self.model_fn = model_fn
         subset = Subset(dataset, indices)
         self.loader = DataLoader(subset, batch_size=32, shuffle=True)
 
     def train(self, global_params, epochs=1, lr=0.01):
-        # load global model
-        model = self.model_fn()
-        model.load_state_dict(global_params)
+        model = self.model_fn(); model.load_state_dict(global_params)
         model.to(self.device)
-        optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-        criterion = nn.CrossEntropyLoss()
-
-        # simulate compute time
-        num_samples = len(self.loader.dataset)
-        compute_time = num_samples / self.compute_speed
-
-        # actual local training
+        opt = torch.optim.SGD(model.parameters(), lr=lr)
+        crit = nn.CrossEntropyLoss()
+        compute_time = len(self.loader.dataset)/self.comp_speed
         for _ in range(epochs):
-            for data, target in self.loader:
-                data, target = data.to(self.device), target.to(self.device)
-                optimizer.zero_grad()
-                output = model(data)
-                loss = criterion(output, target)
-                loss.backward()
-                optimizer.step()
-
-        # simulate communication time (model size ~ params * 4 bytes)
-        param_size = sum(p.numel() for p in model.parameters()) * 4
-        comm_time = param_size / self.comm_speed
-
-        return model.state_dict(), compute_time + comm_time
+            for x,y in self.loader:
+                x,y = x.to(self.device), y.to(self.device)
+                opt.zero_grad(); out=model(x); loss=crit(out,y)
+                loss.backward(); opt.step()
+        param_size = sum(p.numel() for p in model.parameters())*4
+        comm_time = param_size/self.comm_speed
+        return model.state_dict(), compute_time+comm_time
 
 # -----------------------
 # Federated Simulation
 # -----------------------
 class FederatedSimulation:
-    def __init__(self, dataset_name, dataset, model_fn, device):
-        self.dataset_name = dataset_name
-        self.dataset = dataset
-        self.model_fn = model_fn
-        self.device = device
+    def __init__(self, name, dataset, model_fn, device):
+        self.name, self.dataset = name, dataset
+        self.model_fn, self.device = model_fn, device
 
-    def run(self, client_indices, selection_probs, num_rounds=50, epochs=1):
-        # initialize global model
+    def run(self, client_indices, strategy, num_rounds=50, epochs=1):
+        num_clients = len(client_indices)
+        # init global
         global_model = self.model_fn().to(self.device)
         global_params = global_model.state_dict()
-
-        clients = []
-        for cid, inds in enumerate(client_indices):
-            compute_speed = random.uniform(50, 200)
-            comm_speed = random.uniform(1e5, 5e5)
+        # init clients
+        reputations = np.zeros(num_clients)
+        sel_counts = np.zeros(num_clients)
+        clients=[]
+        for cid,inds in enumerate(client_indices):
+            comp=random.uniform(50,200); comm=random.uniform(1e5,5e5)
+            reputations[cid]=comp+comm
             clients.append(Client(cid, self.dataset, inds,
-                                   lambda: self.model_fn(), self.device,
-                                   compute_speed, comm_speed))
-
-        history = {'round': [], 'time': [], 'loss': []}
-        total_time = 0.0
-
-        for r in range(1, num_rounds+1):
-            selected_ids = np.random.choice(len(clients), size=max(1, int(len(clients)*0.1)),
-                                            replace=False, p=selection_probs)
+                                  lambda: self.model_fn(), self.device,
+                                  comp, comm))
+        history={'round':[],'time':[],'loss':[],'acc':[]}
+        total_time=0.0
+        for r in range(1,num_rounds+1):
+            # selection
+            if strategy=='random':
+                sel = np.random.choice(num_clients,5,replace=False)
+            elif strategy=='comp_greedy':
+                sel = np.argsort([-c.comp_speed for c in clients])[:5]
+            elif strategy=='comm_greedy':
+                sel = np.argsort([-c.comm_speed for c in clients])[:5]
+            elif strategy=='rbff':
+                scores = reputations/(1+sel_counts)
+                sel = np.argsort(-scores)[:5]
+            elif strategy=='rbcsf':
+                scores = reputations - sel_counts
+                sel = np.argsort(-scores)[:5]
+            else:
+                raise ValueError(f"Unknown strategy {strategy}")
+            # train
             updates, times = [], []
-            for cid in selected_ids:
-                w, t = clients[cid].train(global_params, epochs)
+            for cid in sel:
+                w,t=clients[cid].train(global_params, epochs)
                 updates.append(w); times.append(t)
+                sel_counts[cid]+=1
             # aggregate
-            new_params = {k: sum(u[k] for u in updates) / len(updates) for k in global_params}
-            global_params = new_params
-
+            newp={k:sum(u[k] for u in updates)/len(updates) for k in global_params}
+            global_params=newp
             # eval
             global_model.load_state_dict(global_params)
             global_model.eval()
-            loader = DataLoader(self.dataset, batch_size=128)
-            criterion = nn.CrossEntropyLoss()
-            loss = sum(criterion(global_model(data.to(self.device)), target.to(self.device)).item() * data.size(0)
-                       for data, target in loader) / len(self.dataset)
-
-            total_time += sum(times)
+            loader=DataLoader(self.dataset,batch_size=128)
+            crit=nn.CrossEntropyLoss()
+            loss,sum_correct=0,0
+            with torch.no_grad():
+                for x,y in loader:
+                    x,y=x.to(self.device),y.to(self.device)
+                    out=global_model(x); loss+=crit(out,y).item()*x.size(0)
+                    sum_correct+=(out.argmax(1)==y).sum().item()
+            loss/=len(self.dataset)
+            acc=sum_correct/len(self.dataset)
+            total_time+=sum(times)
             history['round'].append(r)
             history['time'].append(total_time)
             history['loss'].append(loss)
-            print(f"{self.dataset_name} R{r}: t={total_time:.2f}s, loss={loss:.4f}")
-
-        return history
+            history['acc'].append(acc)
+            print(f"{self.name} R{r} [{strategy}]: t={total_time:.2f}s, loss={loss:.4f}, acc={acc:.4f}")
+        # JFI
+        s=sel_counts; jfi=(s.sum()**2)/(num_clients*(s**2).sum())
+        return history, global_params, total_time, jfi
 
 # -----------------------
-# Experiment Driver
+# Main Experiment Driver
 # -----------------------
 def main(results_dir="results"):
-    os.makedirs(results_dir, exist_ok=True)
+    os.makedirs(results_dir,exist_ok=True)
+    log_path=os.path.join(results_dir,'log.csv')
+    if not os.path.exists(log_path):
+        with open(log_path,'w',newline='') as f:
+            writer=csv.writer(f)
+            writer.writerow(['dataset','n_clients','distribution','strategy','final_loss','final_acc','total_time','JFI'])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     datasets = {
-        'EMNIST': EMNIST('../data/emnist', split='balanced', download=True,
-                         transform=transforms.ToTensor()),
-        'FashionMNIST': FashionMNIST('../data', download=True,
-                                     transform=transforms.ToTensor()),
-        'CIFAR10': CIFAR10('../data', download=True,
-                           transform=transforms.ToTensor())
+        'EMNIST': EMNIST('../data/emnist', split='balanced', download=True, transform=transforms.ToTensor()),
+        'FashionMNIST': FashionMNIST('../data', download=True, transform=transforms.ToTensor()),
+        'CIFAR10': CIFAR10('../data', download=True, transform=transforms.ToTensor())
     }
+    client_counts=[10,20,50]
+    splits={'iid':partition_data_iid,'quantity_skew':partition_data_quantity_skew_iid,'class_noniid':partition_data_class_noniid}
+    strategies=['random','comp_greedy','comm_greedy','rbff','rbcsf']
+    for name,dset in datasets.items():
+        for n in client_counts:
+            idxs={k:fn(dset,n) for k,fn in splits.items()}
+            for dist,indices in idxs.items():
+                for strat in strategies:
+                    sim=FederatedSimulation(name,dset,lambda:SimpleCNN(dset[0][0].shape[0],len(dset.classes)),device)
+                    hist,params,t,jfi = sim.run(indices,strat)
+                    final_loss,final_acc=hist['loss'][-1],hist['acc'][-1]
+                    with open(log_path,'a',newline='') as f:
+                        csv.writer(f).writerow([name,n,dist,strat,final_loss,final_acc,t,jfi])
+    print("All experiments completed.")
 
-    client_counts = [10, 20, 50]
-    skew_types = ['iid', 'quantity_skew', 'class_noniid']
-
-    for name, dataset in datasets.items():
-        for n_clients in client_counts:
-            print(f"Partitioning {name} with {n_clients} clients")
-            idx_iid = partition_data_iid(dataset, n_clients)
-            idx_qty = partition_data_quantity_skew_iid(dataset, n_clients)
-            idx_cls = partition_data_class_noniid(dataset, n_clients)
-            partitions = {'iid': idx_iid, 'quantity_skew': idx_qty, 'class_noniid': idx_cls}
-
-            for skew in skew_types:
-                indices = partitions[skew]
-                probs_equal = np.ones(n_clients) / n_clients
-                speeds = np.random.rand(n_clients)
-                probs_speed = speeds / speeds.sum()
-                qty = np.array([len(idx) for idx in indices], float)
-                probs_qty = qty / qty.sum()
-
-                sim = FederatedSimulation(name, dataset,
-                                          lambda: SimpleCNN(dataset[0][0].shape[0], len(dataset.classes)),
-                                          device)
-
-                exps = {'equal': probs_equal, 'speed_weighted': probs_speed, 'quantity_weighted': probs_qty}
-                for exp, probs in exps.items():
-                    hist = sim.run(indices, probs, num_rounds=50)
-                    fname = f"{name}_{n_clients}_{skew}_{exp}.csv"
-                    with open(os.path.join(results_dir, fname), 'w', newline='') as f:
-                        w = csv.writer(f)
-                        w.writerow(['round','time','loss'])
-                        for r,t,l in zip(hist['round'], hist['time'], hist['loss']):
-                            w.writerow([r,t,l])
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
