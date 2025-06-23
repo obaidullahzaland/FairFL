@@ -187,7 +187,7 @@ def main(results_dir="results"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     datasets = {
-        'EMNIST': EMNIST('../data', split='balanced', download=True,
+        'EMNIST': EMNIST('../data/emnist', split='balanced', download=True,
                          transform=transforms.ToTensor()),
         'FashionMNIST': FashionMNIST('../data', download=True,
                                      transform=transforms.ToTensor()),
