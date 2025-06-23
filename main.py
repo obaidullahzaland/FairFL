@@ -26,6 +26,9 @@ class SimpleCNN(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
+# -----------------------
+# Data Partitioning
+# -----------------------
 def partition_data_iid(dataset, num_clients):
     data_size = len(dataset)
     shard_size = data_size // num_clients
@@ -54,19 +57,34 @@ def partition_data_quantity_skew_iid(dataset, num_clients, alpha=0.5):
 
 
 def partition_data_class_noniid(dataset, num_clients, classes_per_client=2):
-    # each client gets a few classes, equal quantity
+    # Class-based non-IID: assign exclusive samples of chosen classes
     targets = np.array(dataset.targets)
     num_classes = len(np.unique(targets))
-    class_indices = {i: np.where(targets == i)[0].tolist() for i in range(num_classes)}
-    client_indices = []
-    for i in range(num_clients):
-        chosen = np.random.choice(range(num_classes), classes_per_client, replace=False)
-        inds = []
-        per_class = len(dataset) // (num_clients * classes_per_client)
-        for c in chosen:
-            chosen_inds = random.sample(class_indices[c], per_class)
-            inds.extend(chosen_inds)
-        client_indices.append(inds)
+    # random class assignment per client
+    client_classes = [np.random.choice(num_classes, classes_per_client, replace=False).tolist()
+                      for _ in range(num_clients)]
+    # map class to clients
+    class2clients = {c: [] for c in range(num_classes)}
+    for cid, clist in enumerate(client_classes):
+        for c in clist:
+            class2clients[c].append(cid)
+    # initialize indices
+    client_indices = [[] for _ in range(num_clients)]
+    # distribute samples for each class
+    for c, clients_with_c in class2clients.items():
+        if not clients_with_c:
+            continue
+        inds = np.where(targets == c)[0].tolist()
+        random.shuffle(inds)
+        # split inds evenly among clients_with_c
+        k = len(clients_with_c)
+        shard_size = len(inds) // k
+        remainder = len(inds) % k
+        start = 0
+        for i, cid in enumerate(clients_with_c):
+            size = shard_size + (1 if i < remainder else 0)
+            client_indices[cid].extend(inds[start:start+size])
+            start += size
     return client_indices
 
 # -----------------------
@@ -94,7 +112,7 @@ class Client:
         num_samples = len(self.loader.dataset)
         compute_time = num_samples / self.compute_speed
 
-        # actual local training (fast)
+        # actual local training
         for _ in range(epochs):
             for data, target in self.loader:
                 data, target = data.to(self.device), target.to(self.device)
@@ -108,7 +126,6 @@ class Client:
         param_size = sum(p.numel() for p in model.parameters()) * 4
         comm_time = param_size / self.comm_speed
 
-        # return updated weights and time cost
         return model.state_dict(), compute_time + comm_time
 
 # -----------------------
@@ -128,9 +145,8 @@ class FederatedSimulation:
 
         clients = []
         for cid, inds in enumerate(client_indices):
-            # assign random speeds
-            compute_speed = random.uniform(50, 200)  # samples/sec
-            comm_speed = random.uniform(1e5, 5e5)   # bytes/sec
+            compute_speed = random.uniform(50, 200)
+            comm_speed = random.uniform(1e5, 5e5)
             clients.append(Client(cid, self.dataset, inds,
                                    lambda: self.model_fn(), self.device,
                                    compute_speed, comm_speed))
@@ -139,43 +155,29 @@ class FederatedSimulation:
         total_time = 0.0
 
         for r in range(1, num_rounds+1):
-            # select clients
-            selected_ids = np.random.choice(len(clients), size=int(len(clients)*0.1),
+            selected_ids = np.random.choice(len(clients), size=max(1, int(len(clients)*0.1)),
                                             replace=False, p=selection_probs)
-            updates = []
-            times = []
-            # local training
+            updates, times = [], []
             for cid in selected_ids:
-                weights, tcost = clients[cid].train(global_params, epochs)
-                updates.append(weights)
-                times.append(tcost)
+                w, t = clients[cid].train(global_params, epochs)
+                updates.append(w); times.append(t)
             # aggregate
-            new_params = {}
-            for k in global_params.keys():
-                new_params[k] = sum([u[k] for u in updates]) / len(updates)
+            new_params = {k: sum(u[k] for u in updates) / len(updates) for k in global_params}
             global_params = new_params
 
-            # evaluate global loss
+            # eval
             global_model.load_state_dict(global_params)
             global_model.eval()
             loader = DataLoader(self.dataset, batch_size=128)
             criterion = nn.CrossEntropyLoss()
-            loss = 0
-            with torch.no_grad():
-                for data, target in loader:
-                    data, target = data.to(self.device), target.to(self.device)
-                    output = global_model(data)
-                    loss += criterion(output, target).item() * data.size(0)
-            loss /= len(self.dataset)
+            loss = sum(criterion(global_model(data.to(self.device)), target.to(self.device)).item() * data.size(0)
+                       for data, target in loader) / len(self.dataset)
 
-            # record
-            round_time = sum(times)
-            total_time += round_time
+            total_time += sum(times)
             history['round'].append(r)
             history['time'].append(total_time)
             history['loss'].append(loss)
-
-            print(f"Dataset {self.dataset_name}, Round {r}, Time {total_time:.2f}s, Loss {loss:.4f}")
+            print(f"{self.dataset_name} R{r}: t={total_time:.2f}s, loss={loss:.4f}")
 
         return history
 
@@ -200,8 +202,7 @@ def main(results_dir="results"):
 
     for name, dataset in datasets.items():
         for n_clients in client_counts:
-            # partition data
-            print(f"Partitioning Dataset {name}")
+            print(f"Partitioning {name} with {n_clients} clients")
             idx_iid = partition_data_iid(dataset, n_clients)
             idx_qty = partition_data_quantity_skew_iid(dataset, n_clients)
             idx_cls = partition_data_class_noniid(dataset, n_clients)
@@ -209,36 +210,25 @@ def main(results_dir="results"):
 
             for skew in skew_types:
                 indices = partitions[skew]
-                # base: equal prob
                 probs_equal = np.ones(n_clients) / n_clients
-                # weighted by capability: assign after init
-                # here simulate weights by random speeds
                 speeds = np.random.rand(n_clients)
                 probs_speed = speeds / speeds.sum()
-                # weighted by data quantity
-                qty = np.array([len(idx) for idx in indices], dtype=float)
+                qty = np.array([len(idx) for idx in indices], float)
                 probs_qty = qty / qty.sum()
 
-                sim = FederatedSimulation(name, dataset, 
-                                          lambda: SimpleCNN(dataset[0][0].shape[0],
-                                                            len(dataset.classes) if hasattr(dataset, 'classes') else 10),
+                sim = FederatedSimulation(name, dataset,
+                                          lambda: SimpleCNN(dataset[0][0].shape[0], len(dataset.classes)),
                                           device)
 
-                experiments = {
-                    'equal': probs_equal,
-                    'speed_weighted': probs_speed,
-                    'quantity_weighted': probs_qty
-                }
-
-                for exp_name, probs in experiments.items():
-                    history = sim.run(indices, probs, num_rounds=50)
-                    # save
-                    fname = f"{name}_{n_clients}_{skew}_{exp_name}.csv"
+                exps = {'equal': probs_equal, 'speed_weighted': probs_speed, 'quantity_weighted': probs_qty}
+                for exp, probs in exps.items():
+                    hist = sim.run(indices, probs, num_rounds=50)
+                    fname = f"{name}_{n_clients}_{skew}_{exp}.csv"
                     with open(os.path.join(results_dir, fname), 'w', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow(['round', 'time', 'loss'])
-                        for r, t, l in zip(history['round'], history['time'], history['loss']):
-                            writer.writerow([r, t, l])
+                        w = csv.writer(f)
+                        w.writerow(['round','time','loss'])
+                        for r,t,l in zip(hist['round'], hist['time'], hist['loss']):
+                            w.writerow([r,t,l])
 
 if __name__ == "__main__":
     main()
