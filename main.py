@@ -9,10 +9,9 @@ import random
 import os
 import csv
 import argparse
+from sklearn.metrics import roc_auc_score
 
-# -----------------------
-# Model Definition
-# -----------------------
+
 class SimpleCNN(nn.Module):
     def __init__(self, input_channels, num_classes):
         super(SimpleCNN, self).__init__()
@@ -29,9 +28,7 @@ class SimpleCNN(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-# -----------------------
-# Data Partitioning
-# -----------------------
+
 def partition_data_iid(dataset, num_clients):
     data_size = len(dataset)
     shard_size = data_size // num_clients
@@ -44,11 +41,9 @@ def partition_data_quantity_skew_iid(dataset, num_clients, alpha=0.5):
     n = len(dataset)
     props = np.random.dirichlet([alpha]*num_clients)
     # allocate counts with at least 1 each
-    base = np.floor(props * (n - num_clients)).astype(int)  # leave room for one per client
+    base = np.floor(props * (n - num_clients)).astype(int)
     sizes = base + 1
-    # adjust for rounding error
     excess = n - sizes.sum()
-    # distribute excess randomly
     for i in np.argsort(props)[-excess:]:
         sizes[i] += 1
 
@@ -64,7 +59,6 @@ def partition_data_quantity_skew_iid(dataset, num_clients, alpha=0.5):
 def partition_data_class_noniid(dataset, num_clients, classes_per_client=2):
     targets = np.array(dataset.targets)
     num_classes = len(np.unique(targets))
-    # assign classes
     client_classes = [np.random.choice(num_classes, classes_per_client, replace=False).tolist()
                       for _ in range(num_clients)]
     class2clients = {c: [] for c in range(num_classes)}
@@ -83,9 +77,7 @@ def partition_data_class_noniid(dataset, num_clients, classes_per_client=2):
             client_indices[cid].extend(inds[st:st+size]); st+=size
     return client_indices
 
-# -----------------------
-# Client Simulation
-# -----------------------
+
 class Client:
     def __init__(self, cid, dataset, indices, model_fn, device, comp_speed, comm_speed):
         self.cid = cid
@@ -115,9 +107,7 @@ class Client:
         comm_time = param_size/self.comm_speed
         return model.state_dict(), compute_time + comm_time
 
-# -----------------------
-# Federated Simulation
-# -----------------------
+
 class FederatedSimulation:
     def __init__(self, name, dataset, model_fn, device):
         self.name = name
@@ -127,24 +117,22 @@ class FederatedSimulation:
 
     def run(self, client_indices, strategy, num_rounds=50, epochs=1, dynamic_resources=False):
         num_clients = len(client_indices)
-        # initialize global model
         global_model = self.model_fn().to(self.device)
         global_params = global_model.state_dict()
-        # initialize reputations and selection counts
+
         reputations = np.zeros(num_clients)
         sel_counts = np.zeros(num_clients, dtype=int)
         clients = []
-        # initial client speeds
         for cid, inds in enumerate(client_indices):
             comp = random.uniform(50,200)
             comm = random.uniform(1e5,5e5)
             reputations[cid] = comp + comm
             clients.append(Client(cid, self.dataset, inds, lambda: self.model_fn(), self.device, comp, comm))
-        # history logging
-        history = {'round': [], 'time': [], 'loss': [], 'acc': [], 'jfi': []}
+
+        history = {'round': [], 'time': [], 'loss': [], 'acc': [], 'jfi': [], 'auc': [], 'roc': []}
         total_time = 0.0
+
         for r in range(1, num_rounds+1):
-            # dynamic resource update
             if dynamic_resources:
                 for cid, client in enumerate(clients):
                     comp = random.uniform(50,200)
@@ -152,7 +140,7 @@ class FederatedSimulation:
                     client.comp_speed = comp
                     client.comm_speed = comm
                     reputations[cid] = comp + comm
-            # client selection
+
             n_sel = int(num_clients * 0.4)
             if strategy == 'random':
                 sel = np.random.choice(num_clients, n_sel, replace=False)
@@ -164,60 +152,77 @@ class FederatedSimulation:
                 scores = reputations / (1 + sel_counts)
                 sel = np.argsort(scores)[::-1][:n_sel]
             elif strategy == 'rbcsf':
-                scores = reputations - sel_counts
+                # Scale penalty so selection penalties are on same order as reputations
+                max_rep = reputations.max()
+                penalty_per_pick = max_rep / float(num_rounds)
+                scores = reputations - penalty_per_pick * sel_counts
                 sel = np.argsort(scores)[::-1][:n_sel]
             else:
                 raise ValueError(f"Unknown strategy {strategy}")
-            # local training
+
             updates, times = [], []
             for cid in sel:
                 w, t = clients[cid].train(global_params, epochs)
                 updates.append(w)
                 times.append(t)
                 sel_counts[cid] += 1
+
             # aggregate
             global_params = {k: sum(u[k] for u in updates) / len(updates) for k in global_params}
+
             # evaluate
             global_model.load_state_dict(global_params)
             global_model.eval()
             loader = DataLoader(self.dataset, batch_size=128)
             criterion = nn.CrossEntropyLoss()
             total_loss, correct = 0.0, 0
+            all_true, all_probs = [], []
             with torch.no_grad():
                 for x,y in loader:
                     x,y = x.to(self.device), y.to(self.device)
                     out = global_model(x)
-                    total_loss += criterion(out, y).item() * x.size(0)
-                    correct += (out.argmax(1) == y).sum().item()
+                    loss = criterion(out, y)
+                    total_loss += loss.item() * x.size(0)
+                    preds = out.argmax(dim=1)
+                    correct += (preds == y).sum().item()
+                    probs = F.softmax(out, dim=1)
+                    all_probs.extend(probs.cpu().numpy())
+                    all_true.extend(y.cpu().numpy())
+
             avg_loss = total_loss / len(self.dataset)
             acc = correct / len(self.dataset)
+            # compute ROC-AUC scores (macro and micro)
+            auc_macro = roc_auc_score(all_true, all_probs, multi_class='ovr', average='macro')
+            auc_micro = roc_auc_score(all_true, all_probs, multi_class='ovr', average='micro')
+
             total_time += sum(times)
-            # fairness
             s = sel_counts
             jfi = (s.sum()**2) / (num_clients * (s**2).sum())
-            # record
+
             history['round'].append(r)
             history['time'].append(total_time)
             history['loss'].append(avg_loss)
             history['acc'].append(acc)
             history['jfi'].append(jfi)
+            history['auc'].append(auc_macro)
+            history['roc'].append(auc_micro)
+
             print(f"{self.name} R{r} [{strategy} - {'dynamic' if dynamic_resources else 'static'}]: "
-                  f"t={total_time:.2f}s, loss={avg_loss:.4f}, acc={acc:.4f}, jfi={jfi:.4f}")
+                  f"t={total_time:.2f}s, loss={avg_loss:.4f}, acc={acc:.4f}, jfi={jfi:.4f}, "
+                  f"auc={auc_macro:.4f}, roc={auc_micro:.4f}")
+
         return history
 
-# -----------------------
-# Main Experiment Driver
-# -----------------------
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--results_dir', type=str, default='results')
+    parser.add_argument('--results_dir', type=str, default='newresults')
     parser.add_argument('--dynamic_resources', action='store_true',
                         help='If set, computation and communication speeds change each round')
     args = parser.parse_args()
 
     os.makedirs(args.results_dir, exist_ok=True)
 
-    # datasets
     datasets = {
         'EMNIST': EMNIST(os.path.join('..','data','emnist'), split='balanced', download=True,
                          transform=transforms.ToTensor()),
@@ -236,25 +241,23 @@ def main():
 
     for name, dataset in datasets.items():
         for n in client_counts:
-            # partition data
             partitions = {k: fn(dataset, n) for k, fn in splits.items()}
             for dist, indices in partitions.items():
                 for strat in strategies:
-                    # run simulation
                     sim = FederatedSimulation(name, dataset,
                                               lambda: SimpleCNN(dataset[0][0].shape[0], len(dataset.classes)),
                                               torch.device("cuda" if torch.cuda.is_available() else "cpu"))
                     history = sim.run(indices, strat, dynamic_resources=args.dynamic_resources)
-                    # log per-experiment file
                     mode = 'dynamic' if args.dynamic_resources else 'static'
                     fname = f"{name}_{n}_{dist}_{strat}_{mode}.csv"
                     path = os.path.join(args.results_dir, fname)
                     with open(path, 'w', newline='') as f:
                         writer = csv.writer(f)
-                        writer.writerow(['round', 'time', 'loss', 'acc', 'jfi'])
-                        for r, t, l, a, j in zip(history['round'], history['time'],
-                                                 history['loss'], history['acc'], history['jfi']):
-                            writer.writerow([r, t, l, a, j])
+                        writer.writerow(['round', 'time', 'loss', 'acc', 'jfi', 'auc', 'roc'])
+                        for r, t, l, a, j, uu, rr in zip(
+                                history['round'], history['time'], history['loss'],
+                                history['acc'], history['jfi'], history['auc'], history['roc']):
+                            writer.writerow([r, t, l, a, j, uu, rr])
     print("All experiments completed.")
 
 if __name__ == "__main__":
