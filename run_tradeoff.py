@@ -270,8 +270,8 @@ def main():
     # prepare datasets
     datasets = {
         'EMNIST': EMNIST('../data/emnist', split='balanced', download=True, transform=transforms.ToTensor()),
-        'FashionMNIST': FashionMNIST('../data/fashionmnist', download=True, transform=transforms.ToTensor()),
-        'CIFAR10': CIFAR10('../data/cifar10', download=True, transform=transforms.ToTensor())
+        'FashionMNIST': FashionMNIST('../data', download=True, transform=transforms.ToTensor()),
+        'CIFAR10': CIFAR10('../data', download=True, transform=transforms.ToTensor())
     }
     strategies = ['random', 'comp_greedy', 'comm_greedy', 'rbff', 'rbcsf']
 
