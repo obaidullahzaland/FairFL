@@ -1,2 +1,2 @@
-python main.py
-python main.py --dynamic_resources
+python run_tradeoff.py
+python run_tradeoff.py --dynamic_resources
