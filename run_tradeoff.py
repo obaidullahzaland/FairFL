@@ -1,7 +1,7 @@
 import os
 import csv
 import argparse
-from federated import FederatedSimulation, SimpleCNN, EMNIST, FashionMNIST, CIFAR10  # assume your classes are in federated.py
+from main import FederatedSimulation, SimpleCNN, EMNIST, FashionMNIST, CIFAR10  # assume your classes are in federated.py
 import torchvision.transforms as transforms
 import torch
 
