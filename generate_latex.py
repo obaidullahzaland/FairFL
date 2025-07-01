@@ -4,7 +4,7 @@ import pandas as pd
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 RESULTS_DIR  = 'newresults'
-DATASET      = 'EMNIST'
+DATASET      = 'FashionMNIST'
 CLIENTS      = 50
 
 DISTRIBUTIONS = ['iid', 'class_noniid', 'quantity_skew']
