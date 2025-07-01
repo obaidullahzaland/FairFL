@@ -1,0 +1,27 @@
+\begin{table*}[htbp]
+  \centering
+  \caption{Performance of different methods under various data distributions on the EMNIST dataset with 50 clients.}
+  \label{tab:results}
+  \begin{tabularx}{\textwidth}{m{1.5cm} m{2cm} *{15}{X}}
+    \toprule
+    Resource & Method & \multicolumn{5}{c}{Iid} & \multicolumn{5}{c}{Class Noniid} & \multicolumn{5}{c}{Quantity Skew} \\
+    \cmidrule(lr){3-7} \cmidrule(lr){8-12} \cmidrule(lr){13-17}
+      &  Acc $\uparrow$ & Time $\downarrow$ & JFI $\uparrow$ & AUC $\uparrow$ & ROC $\uparrow$  \\  Acc $\uparrow$ & Time $\downarrow$ & JFI $\uparrow$ & AUC $\uparrow$ & ROC $\uparrow$  \\  Acc $\uparrow$ & Time $\downarrow$ & JFI $\uparrow$ & AUC $\uparrow$ & ROC $\uparrow$  \\  
+    \midrule
+    \multirow{5}{*}{Static}
+      & Random       & 75.76 & 28791.685 & 0.980 & 0.990 & 0.991 & 31.61 & 25493.535 & 0.973 & 0.894 & 0.863 & 76.25 & 25919.875 & 0.973 & 0.991 & 0.992 \\
+      & Rbff         & 78.03 & 26063.689 & 0.885 & 0.992 & 0.993 & 35.03 & 24023.221 & 0.873 & 0.890 & 0.855 & 76.59 & 28926.950 & 0.883 & 0.991 & 0.992 \\
+      & Rbcsf        & 76.75 & 24241.047 & 0.776 & 0.991 & 0.992 & 29.85 & 26565.724 & 0.726 & 0.893 & 0.860 & 77.00 & 23744.836 & 0.742 & 0.991 & 0.992 \\
+      & Comm-greedy  & 76.23 & 29263.085 & 0.400 & 0.990 & 0.991 & 28.61 & 20988.710 & 0.400 & 0.770 & 0.688 & 75.33 & 17711.823 & 0.400 & 0.989 & 0.990 \\
+      & Comp-greedy  & 77.72 & 19355.522 & 0.400 & 0.991 & 0.992 & 29.70 & 17536.073 & 0.400 & 0.754 & 0.679 & 73.50 & 16672.901 & 0.400 & 0.988 & 0.989 \\
+    \midrule
+    \multirow{5}{*}{Dynamic}
+      & Random       & 77.80 & 27906.913 & 0.969 & 0.991 & 0.992 & 38.19 & 26261.770 & 0.969 & 0.912 & 0.866 & 76.28 & 25867.400 & 0.971 & 0.990 & 0.991 \\
+      & Rbff         & 77.16 & 24658.312 & 0.993 & 0.991 & 0.992 & 38.57 & 22914.447 & 0.994 & 0.915 & 0.875 & 77.08 & 24614.386 & 0.996 & 0.991 & 0.992 \\
+      & Rbcsf        & 76.35 & 25172.269 & 0.986 & 0.990 & 0.991 & 37.86 & 22338.077 & 0.989 & 0.904 & 0.870 & 76.99 & 24489.140 & 0.990 & 0.991 & 0.992 \\
+      & Comm-greedy  & 78.07 & 25198.577 & 0.964 & 0.992 & 0.993 & 36.87 & 22985.967 & 0.964 & 0.904 & 0.870 & 77.37 & 24230.825 & 0.956 & 0.992 & 0.992 \\
+      & Comp-greedy  & 77.22 & 20412.649 & 0.976 & 0.991 & 0.992 & 36.26 & 19185.028 & 0.973 & 0.911 & 0.871 & 77.89 & 20123.882 & 0.968 & 0.991 & 0.993 \\
+    \midrule
+    \bottomrule
+  \end{tabularx}
+\end{table*}
