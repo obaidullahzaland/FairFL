@@ -1,95 +1,114 @@
 #!/usr/bin/env python3
 import os
 import pandas as pd
-from glob import glob
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-RESULTS_DIR = 'newresults'
-DATASET    = 'CIRAR10'
-CLIENTS    = 50
+RESULTS_DIR  = 'newresults'
+DATASET      = 'EMNIST'
+CLIENTS      = 50
 
-# note: 'non_iid' here replaces your old 'class_noniid'
-DISTRIBUTIONS = ['iid', 'non_iid', 'quantity_skew']
-DIST_LABELS   = {
-    'iid': 'IID',
-    'non_iid': 'Class non-IID',
-    'quantity_skew': 'Quantity non-IID'
-}
-STRATEGIES    = ['random', 'comp_greedy', 'comm_greedy', 'rbff', 'rbcsf']
+DISTRIBUTIONS = ['iid', 'class_noniid', 'quantity_skew']
+METHODS       = ['random', 'rbff', 'rbcsf', 'comm_greedy', 'comp_greedy']
 MODES         = ['static', 'dynamic']
 
 METRICS = [
-    ('acc', lambda x: x * 100, r'Acc $\uparrow$'),
-    ('time', lambda x: x,      r'Time $\downarrow$'),
-    ('jfi', lambda x: x,       r'JFI $\uparrow$'),
-    ('auc', lambda x: x,       r'AUC $\uparrow$'),
-    ('roc', lambda x: x,       r'ROC $\uparrow$'),
+    ('acc',  lambda x: x * 100, r'Acc $\uparrow$'),
+    ('time', lambda x: x,       r'Time $\downarrow$'),
+    ('jfi',  lambda x: x,       r'JFI $\uparrow$'),
+    ('auc',  lambda x: x,       r'AUC $\uparrow$'),
+    ('roc',  lambda x: x,       r'ROC $\uparrow$'),
 ]
 # ────────────────────────────────────────────────────────────────────────────────
 
-# 1) Load all CSVs into one DataFrame with annotations
+# 1) Gather “final‐round” rows for every existing file
 records = []
-for fp in glob(os.path.join(RESULTS_DIR, '*.csv')):
-    name = os.path.basename(fp)[:-4]
-    try:
-        dataset, clients_str, dist, strat, mode = name.split('_')
-    except ValueError:
-        print(f"Skipping `{name}.csv`: filename must be Dataset_Clients_Distribution_Method_Mode.csv")
-        continue
+for dist in DISTRIBUTIONS:
+    for meth in METHODS:
+        for mode in MODES:
+            fname = f"{DATASET}_{CLIENTS}_{dist}_{meth}_{mode}.csv"
+            fpath = os.path.join(RESULTS_DIR, fname)
+            if not os.path.exists(fpath):
+                print(f"– missing {fname}, skipping")
+                continue
 
-    if dataset not in ['FashionMNIST', 'EMNIST', 'CIFAR10']:
-        print(f"Skipping `{name}.csv`: unknown dataset `{dataset}`")
-        continue
-    if dist not in DISTRIBUTIONS:
-        print(f"Skipping `{name}.csv`: unknown distribution `{dist}`")
-        continue
-    if strat not in STRATEGIES:
-        print(f"Skipping `{name}.csv`: unknown strategy `{strat}`")
-        continue
-    if mode not in MODES:
-        print(f"Skipping `{name}.csv`: unknown mode `{mode}`")
-        continue
-
-    try:
-        clients = int(clients_str)
-    except ValueError:
-        print(f"Skipping `{name}.csv`: invalid client count `{clients_str}`")
-        continue
-
-    df = pd.read_csv(fp)
-    df['dataset']      = dataset
-    df['clients']      = clients
-    df['distribution'] = dist
-    df['strategy']     = strat
-    df['mode']         = mode
-    records.append(df)
+            df = pd.read_csv(fpath)
+            # pick final round
+            last = df.loc[df['round'].idxmax()]
+            # annotate
+            rec = {
+                'dataset': DATASET,
+                'clients': CLIENTS,
+                'distribution': dist,
+                'strategy': meth,
+                'mode': mode,
+            }
+            # compute every metric
+            for key, func, _ in METRICS:
+                rec[key] = func(last[key])
+            records.append(rec)
 
 if not records:
-    raise RuntimeError(f"No valid CSV files found in {RESULTS_DIR}")
+    raise RuntimeError("No valid CSVs found for EMNIST with 50 clients!")
 
-all_df = pd.concat(records, ignore_index=True)
+results_df = pd.DataFrame(records)
 
-# 2) Filter to FashionMNIST & 50 clients
-df = all_df.query("dataset == @DATASET and clients == @CLIENTS")
-
-# 3) Pull final‐round metrics
+# 2) Pivot into nested dict for easy table‐building
 results = {}
 for mode in MODES:
     results[mode] = {}
-    for strat in STRATEGIES:
-        results[mode][strat] = {}
+    for meth in METHODS:
+        results[mode][meth] = {}
         for dist in DISTRIBUTIONS:
-            sub = df.query("mode == @mode and strategy == @strat and distribution == @dist")
+            sub = results_df.query(
+                "mode==@mode and strategy==@meth and distribution==@dist"
+            )
             if sub.empty:
                 vals = {m[0]: None for m in METRICS}
             else:
-                last = sub.loc[sub['round'].idxmax()]
-                vals = {m[0]: m[1](last[m[0]]) for m in METRICS}
-            results[mode][strat][dist] = vals
+                row = sub.iloc[0]
+                vals = {m[0]: row[m[0]] for m in METRICS}
+            results[mode][meth][dist] = vals
 
-# 4) Build LaTeX table as before...
-#    (same code to assemble header, cmidrules, body, etc.)
-#    Just reuse the block from the prior script.
+# 3) Assemble LaTeX table
+lines = []
+lines.append(r"\begin{table*}[htbp]")
+lines.append(r"  \centering")
+lines.append(r"  \caption{Performance of different methods under various data distributions on the EMNIST dataset with 50 clients.}")
+lines.append(r"  \label{tab:results}")
+lines.append(r"  \begin{tabularx}{\textwidth}{m{1.5cm} m{2cm} *{15}{X}}")
+lines.append(r"    \toprule")
+# first header
+hdr = r"    Resource & Method "
+for d in DISTRIBUTIONS:
+    hdr += f"& \\multicolumn{{5}}{{c}}{{{d.replace('_',' ').title()}}} "
+hdr += r"\\"
+lines.append(hdr)
+lines.append(r"    \cmidrule(lr){3-7} \cmidrule(lr){8-12} \cmidrule(lr){13-17}")
+# second header
+sec = r"      &  "
+for _ in DISTRIBUTIONS:
+    sec += " & ".join(m[2] for m in METRICS) + "  \\\\  "
+lines.append(sec)
+lines.append(r"    \midrule")
+# body
+for mode in MODES:
+    lines.append(f"    \\multirow{{{len(METHODS)}}}{{*}}{{{mode.capitalize()}}}")
+    for meth in METHODS:
+        row = f"      & {meth.replace('_','-').capitalize():<12}"
+        for dist in DISTRIBUTIONS:
+            vals = results[mode][meth][dist]
+            for key, _, _ in METRICS:
+                if vals[key] is None:
+                    row += " & ---"
+                else:
+                    fmt = "{:.2f}" if key=='acc' else "{:.3f}"
+                    row += " & " + fmt.format(vals[key])
+        row += r" \\"
+        lines.append(row)
+    lines.append(r"    \midrule")
+lines.append(r"    \bottomrule")
+lines.append(r"  \end{tabularx}")
+lines.append(r"\end{table*}")
 
-# 5) Print it all
-#    print( ... )  # same as before
+# 4) Output
+print("\n".join(lines))
