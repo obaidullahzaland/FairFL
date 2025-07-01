@@ -5,7 +5,7 @@ from glob import glob
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 RESULTS_DIR = 'newresults'
-DATASET    = 'EMNIST'
+DATASET    = 'CIRAR10'
 CLIENTS    = 50
 
 # note: 'non_iid' here replaces your old 'class_noniid'
