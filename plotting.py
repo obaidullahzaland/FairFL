@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -22,7 +23,6 @@ def parse_args():
         help='Directory to save generated plots'
     )
     return parser.parse_args()
-
 
 def load_results(results_dir):
     records = []
@@ -67,27 +67,25 @@ def load_results(results_dir):
         except Exception as e:
             print(f"Warning: could not read {fname}: {e}")
             continue
-        df['dataset'] = dataset
-        df['clients'] = clients
-        df['distribution'] = distribution
-        df['strategy'] = strategy
-        df['mode'] = mode
+        df['dataset']     = dataset
+        df['clients']     = clients
+        df['distribution']= distribution
+        df['strategy']    = strategy
+        df['mode']        = mode
         records.append(df)
 
     if not records:
         raise RuntimeError(f"No valid CSV files found in {results_dir}")
     return pd.concat(records, ignore_index=True)
 
-
 def generate_plots(df, output_dir):
-    # now include 'auc' as a fifth metric
-    metrics = ['acc', 'loss', 'time', 'jfi', 'auc']
-    ylabels = ['Accuracy (%)', 'Log Loss', 'Time (s)', 'JFI', 'AUC']
+    metrics    = ['acc', 'loss', 'time', 'jfi', 'auc']
+    col_titles = ['Accuracy (%)', 'Log Loss', 'Time (s)', 'JFI', 'AUC']
 
-    datasets     = sorted(df['dataset'].unique())
-    distributions= sorted(df['distribution'].unique())
-    clients_list = sorted(df['clients'].unique())
-    modes        = sorted(df['mode'].unique())
+    datasets      = sorted(df['dataset'].unique())
+    distributions = sorted(df['distribution'].unique())
+    clients_list  = sorted(df['clients'].unique())
+    modes         = sorted(df['mode'].unique())
 
     for mode in modes:
         df_mode = df[df['mode'] == mode]
@@ -98,19 +96,19 @@ def generate_plots(df, output_dir):
                 if df_sub.empty:
                     continue
 
-                # 3 rows (datasets) x 5 cols (metrics)
+                n_rows = len(datasets)
+                n_cols = len(metrics)
                 fig, axes = plt.subplots(
-                    nrows=len(datasets), ncols=len(metrics),
-                    figsize=(5 * len(metrics), 4 * len(datasets))
+                    nrows=n_rows, ncols=n_cols,
+                    figsize=(5 * n_cols, 4 * n_rows),
+                    sharex=True
                 )
 
-                subtitle_text = f"Distribution: {distribution} | Clients: {clients} | Mode: {mode.capitalize()}"
-                fig.suptitle(subtitle_text, fontsize=16, y=0.95)
-
+                # Plot each cell
                 for i, dataset in enumerate(datasets):
                     df_data = df_sub[df_sub['dataset'] == dataset]
                     for j, metric in enumerate(metrics):
-                        ax = axes[i][j] if len(datasets) > 1 else axes[j]
+                        ax = axes[i][j] if n_rows > 1 else axes[j]
                         for strategy in sorted(df_data['strategy'].unique()):
                             strat_df = df_data[df_data['strategy'] == strategy]
                             x = strat_df['round']
@@ -120,42 +118,40 @@ def generate_plots(df, output_dir):
                                 y = np.log(strat_df['loss'])
                             else:
                                 y = strat_df[metric]
-                            ax.plot(
-                                x, y,
-                                label=strategy,
-                                linewidth=3
-                            )
-                        # Axis scaling and labels
+                            ax.plot(x, y, label=strategy, linewidth=3)
+
+                        # Adjustments
                         if metric == 'acc':
                             ax.set_ylim(0, 100)
+                        if i == 0:
+                            ax.set_title(col_titles[j], fontsize=22)
                         if j == 0:
-                            ax.set_ylabel(dataset, fontsize=14)
-                        ax.set_xlabel('Round', fontsize=14)
-                        ax.set_title('')        # remove individual subplot titles
-                        ax.tick_params(axis='both', labelsize=12)
+                            ax.set_ylabel(dataset, fontsize=22)
+                        ax.tick_params(axis='both', labelsize=22)
+                        ax.set_xlabel('')  # we'll add a global label
 
-                        # only set y-label on the top row for clarity
-                        ax.set_ylabel(ylabels[j] if i == 0 else '')
+                # Global "Round" label
+                fig.text(0.5, 0.04, 'Round', ha='center', fontsize=22)
 
-                # Shared legend on top, horizontal
+                # Legend at top center
                 handles, labels = axes[0][0].get_legend_handles_labels()
                 fig.legend(
                     handles, labels,
                     loc='upper center',
                     ncol=len(labels),
-                    fontsize=12,
-                    bbox_to_anchor=(0.5, 1.02)
+                    fontsize=22,
+                    bbox_to_anchor=(0.5, 1)
                 )
 
-                plt.tight_layout(rect=[0, 0, 1, 0.92])
+                plt.tight_layout(rect=[0, 0.05, 1, 0.95])
 
-                # Save figure
+                # Save
+                os.makedirs(output_dir, exist_ok=True)
                 fname = f"{distribution}_{clients}_{mode}.png"
                 save_path = os.path.join(output_dir, fname)
                 fig.savefig(save_path)
                 plt.close(fig)
                 print(f"Saved plot: {save_path}")
-
 
 if __name__ == '__main__':
     args = parse_args()
